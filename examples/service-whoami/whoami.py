@@ -2,7 +2,7 @@
 
 This serves `/services/whoami/`, authenticated with the Hub, showing the user their own info.
 """
-import dateutil
+import dateutil.parser
 import os
 import psutil
 import re
@@ -24,8 +24,8 @@ from jupyterhub._data import DATA_FILES_PATH
 from jupyterhub.utils import url_path_join
 
 
-KernelProcess = namedtuple('NotebookProcess',
-                           'pid user mem_percent mem_rss_gb kernel_id last_active_time state notebook ')
+KernelProcess = namedtuple('KernelProcess', 'pid user mem_percent mem_rss_gb kernel_id')
+KernelState = namedtuple('KernelState', 'kernel_proc last_active_time state notebook')
 
 HERE = os.path.abspath(os.path.dirname(__file__))
 KERNEL_REGEX = re.compile(r'kernel-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}).json')
@@ -47,13 +47,12 @@ def get_kernel_procs():
         try:
             kernel_id = get_kernel_id(proc)
             if kernel_id is not None:
-                np = KernelProcess(proc.pid,
+                kp = KernelProcess(proc.pid,
                                    proc.username(),
                                    proc.memory_percent(),
                                    proc.memory_info().rss / GB,
-                                   kernel_id,
-                                   None, None, None)
-                kernel_procs.append(np)
+                                   kernel_id)
+                kernel_procs.append(kp)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
@@ -88,16 +87,19 @@ def get_sessions(users, cookie_jars, user_servers):
 
 
 def enrich_kernel_procs(kernel_procs, sessions):
+    kernel_states = []
     for kp in kernel_procs:
         if kp.user not in sessions:
             continue
         for session in sessions[kp.user]:
             kernel = session.get('kernel', {})
             if kernel.get('id') == kp.kernel_id:
-                kp.notebook = os.path.basename(session.get('notebook', {}).get('path', ''))
-                kp.state = kernel.get('execution_state')
-                kp.last_active_time = dateutil.parser.parse(kernel.get('last_activity', ''))
-    return kernel_procs
+                ks = KernelState(kp,
+                                 dateutil.parser.parse(kernel.get('last_activity', '')),
+                                 kernel.get('execution_state'),
+                                 os.path.basename(session.get('notebook', {}).get('path', '')))
+                kernel_states.append(ks)
+    return kernel_states
 
 
 def get_kernel_resources(hub_api, hub_headers):
@@ -111,8 +113,8 @@ def get_kernel_resources(hub_api, hub_headers):
     print(user_servers)
     sessions = get_sessions(users, cookie_jars, user_servers)
     print(sessions)
-    kernel_procs = enrich_kernel_procs(kernel_procs, sessions)
-    return kernel_procs
+    kernel_states = enrich_kernel_procs(kernel_procs, sessions)
+    return kernel_states
 
 
 async def update_loop(interval, hub_api, hub_headers):
